@@ -105,19 +105,38 @@ int on_gap_events(struct ble_gap_event *event, void *arg) {
 
     g_devices[idx].rssi = rssi;
     g_devices[idx].lastSeenMs = 0;  // Not used; RSSI-only range.
-    // Direction finding: remember the board heading where this device was
-    // strongest, so the radar can point the blip toward it.
+
+    // Low-pass the RSSI so the blip's radius moves smoothly and reflects the
+    // device's CURRENT distance instead of freezing at its all-time peak.
+    if (g_devices[idx].smoothRssi <= -127) {
+      g_devices[idx].smoothRssi = rssi;
+    } else {
+      // Fast toward stronger (approaching), slower away (leaving) for readabilty.
+      float a = (rssi > g_devices[idx].smoothRssi) ? 0.45f : 0.22f;
+      g_devices[idx].smoothRssi = static_cast<int8_t>(
+          g_devices[idx].smoothRssi * (1.0f - a) + rssi * a);
+    }
+
+    // Direction finding with decay: remember the board heading where this
+    // device was strongest, but let it move again if the device drifts away,
+    // so the blip tracks a moving device rather than locking in place.
     if (rssi > g_devices[idx].bestRssi) {
       g_devices[idx].bestRssi = rssi;
       g_devices[idx].bestYaw = g_current_yaw;
+    } else if (g_devices[idx].bestRssi - rssi > 18) {
+      // Device is now clearly weaker: reset the bearing anchor so it can
+      // re-acquire a stronger bearing as the device moves.
+      g_devices[idx].bestRssi = rssi;
+      g_devices[idx].bestYaw = g_current_yaw;
     }
+
     if (!g_devices[idx].hasName) {
       parseLocalName(event->disc.data, event->disc.length_data, &g_devices[idx]);
     }
     if (g_devices[idx].hasName) {
-      ESP_LOGI(kTag, "rssi=%d dBm name=%s", rssi, g_devices[idx].name);
+      ESP_LOGD(kTag, "rssi=%d dBm name=%s", rssi, g_devices[idx].name);
     } else {
-      ESP_LOGI(kTag, "rssi=%d dBm addr=%02x%02x%02x%02x%02x%02x", rssi,
+      ESP_LOGD(kTag, "rssi=%d dBm addr=%02x%02x%02x%02x%02x%02x", rssi,
                event->disc.addr.val[5], event->disc.addr.val[4],
                event->disc.addr.val[3], event->disc.addr.val[2],
                event->disc.addr.val[1], event->disc.addr.val[0]);

@@ -9,8 +9,9 @@
 // One detected BLE advertisement source.
 struct BleDevice {
   uint64_t addr = 0;      // 48-bit MAC as integer (LSB first)
-  int8_t rssi = -127;     // dBm (closer to 0 == stronger == nearer)
-  int8_t bestRssi = -127; // strongest RSSI seen
+  int8_t rssi = -127;     // current RSSI (dBm), strongest reading this scan
+  int8_t smoothRssi = -127;  // low-pass filtered RSSI, drives live radius
+  int8_t bestRssi = -127; // strongest RSSI seen (bearing anchor)
   float bestYaw = 0.0f;   // board yaw (deg) at which bestRssi occurred
   uint8_t addrType = 0;   // 0 = public, 1 = random
   bool hasName = false;

@@ -161,18 +161,21 @@ void draw_radar_frame(float sweep_deg) {
               cy - static_cast<int>(8 * sinf(a)), kHeadingArrow);
   }
 
-  // Device blips with true direction finding: the blip is placed at the
-  // bearing where this device was strongest, relative to the board's current
-  // heading. Point the board at a device and it rises straight up (ahead).
+  // Device blips. Radius = LIVE low-passed distance (device moving toward or
+  // away visually changes). Bearing = smoothed, so it glides as a device moves
+  // instead of jumping. Point the board at a device and it rises straight up,
+  // and as the board rotates the blip tracks in the opposite direction.
   BleDevice devices[16];
   int n = BleScanner::snapshot(devices, 16);
   int shown = 0;
   for (int i = 0; i < n && shown < 8; ++i) {
     BleDevice &d = devices[i];
-    if (d.bestRssi <= -90) continue;
-    float strength = (static_cast<float>(d.bestRssi) + 90.0f) / 55.0f;
+    int8_t rssi = (d.smoothRssi > -127) ? d.smoothRssi : d.bestRssi;
+    if (rssi <= -90) continue;
+    float strength = (static_cast<float>(rssi) + 90.0f) / 55.0f;
     strength = clampf(strength, 0.02f, 1.0f);
     int radius = static_cast<int>(max_r * (1.0f - strength));  // near = inner
+
     // Relative bearing: device bearing minus current board heading.
     float rel = d.bestYaw - g_yaw;
     while (rel > 180.0f) rel -= 360.0f;
@@ -236,8 +239,18 @@ extern "C" void app_main(void) {
     static uint32_t last_yaw_log = 0;
     if (now - last_yaw_log > 2000) {
       last_yaw_log = now;
-      printf("[heading] yaw=%.1f deg | devices=%d\n", g_yaw,
-             BleScanner::snapshot(nullptr, 0));
+      int count = BleScanner::snapshot(nullptr, 0);
+      // Show live RSSI spread so device movement is visible on the radar.
+      BleDevice devs[16];
+      int got = BleScanner::snapshot(devs, 16);
+      int near = 0, mid = 0;
+      for (int i = 0; i < got; ++i) {
+        int8_t r = (devs[i].smoothRssi > -127) ? devs[i].smoothRssi : devs[i].bestRssi;
+        if (r > -65) ++near;
+        else if (r > -85) ++mid;
+      }
+      printf("[heading] yaw=%.1f deg | devices=%d (near %d, mid %d)\n",
+             g_yaw, count, near, mid);
     }
 
     sweep += 10.0f;
