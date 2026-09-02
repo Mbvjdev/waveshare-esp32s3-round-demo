@@ -48,11 +48,15 @@ boot and is not periodically redrawn, so there is no refresh-induced flicker.
 ## Current content
 
 - ST77916 360×360 round LCD over native QSPI (ESP-IDF 5.3.1)
-- SMPTE-style test pattern (color bars + grayscale + primary-color blocks), generated locally
+- **Bulma-style Dragon Ball radar**: concentric rings, rotating sweep beam with fading trail, golden "ahead" heading marker
+- **BLE direction finding + heading**: nearby Bluetooth devices (phones, tags, earbuds) are scanned via NimBLE. Each device is rendered as a blip at the board heading where its RSSI was strongest. Because the QMI8658 is a 6-axis IMU (no magnetometer/compass), heading is derived the authentic radar way: as you rotate the board the gyro reports board yaw, and a blip rises to the top of the radar when you point the board at that device. Blip radius = signal strength (near = inner ring)
+- Verified: QMI8658 detected (WHO_AM_I = 0x05), 13 unique BLE devices tracked including named ones (e.g. `Jaguar`, `FMM130_9866442_LE`)
 - TCA9554-based LCD reset (EXIO2) and backlight
-- The board boots straight to the test pattern
+- `lib/` is intentionally empty — the panel is driven by the native ESP-IDF `esp_lcd` component
 
-Planned next layer (sensor/system pages) will be added on top of this native driver.
+## Hardware notes
+
+The QMI8658 IMU is used only for heading (gyro yaw integration); it is a 6-axis device without a magnetometer, so true north/compass bearing is not available. Direction finding is rotation-based: sweep the board and watch blips lock onto their strongest-signal bearing.
 
 ## Layout
 
