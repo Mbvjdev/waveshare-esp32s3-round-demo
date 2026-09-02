@@ -193,5 +193,5 @@ int BleScanner::snapshot(BleDevice *out, int capacity) {
   for (int i = 0; i < n; ++i) {
     out[i] = g_devices[i];
   }
-  return n;
+  return g_deviceCount;
 }

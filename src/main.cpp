@@ -230,6 +230,16 @@ extern "C" void app_main(void) {
 
     draw_radar_frame(sweep);
     if (g_frame) blit_frame();
+
+    // Periodic heading log while running (verifies the gyro stays put when
+    // the board is held still after offset calibration).
+    static uint32_t last_yaw_log = 0;
+    if (now - last_yaw_log > 2000) {
+      last_yaw_log = now;
+      printf("[heading] yaw=%.1f deg | devices=%d\n", g_yaw,
+             BleScanner::snapshot(nullptr, 0));
+    }
+
     sweep += 10.0f;
     if (sweep >= 360.0f) sweep -= 360.0f;
     vTaskDelay(pdMS_TO_TICKS(40));
