@@ -4,3 +4,5 @@
 *.log
 *.bin
 *.elf
+lib/Arduino_GFX/examples/
+lib/Arduino_GFX/gen_keywords.pl
