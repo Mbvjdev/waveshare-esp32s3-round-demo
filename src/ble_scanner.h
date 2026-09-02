@@ -10,6 +10,8 @@
 struct BleDevice {
   uint64_t addr = 0;      // 48-bit MAC as integer (LSB first)
   int8_t rssi = -127;     // dBm (closer to 0 == stronger == nearer)
+  int8_t bestRssi = -127; // strongest RSSI seen
+  float bestYaw = 0.0f;   // board yaw (deg) at which bestRssi occurred
   uint8_t addrType = 0;   // 0 = public, 1 = random
   bool hasName = false;
   char name[32] = {0};
@@ -25,6 +27,8 @@ class BleScanner {
   static void init();
   // Refresh the cached device table (non-blocking, tasks in background).
   static void poll();
+  // Feed the current board yaw (deg) so BLE DFs can tag bearings.
+  static void set_current_yaw(float yaw_deg);
 
   // Copy of the current device table + count. Thread-safe snapshot.
   static int snapshot(BleDevice *out, int capacity);

@@ -17,6 +17,7 @@ BleDevice g_devices[16];
 int g_deviceCount = 0;
 bool g_started = false;
 bool g_synced = false;
+float g_current_yaw = 0.0f;
 
 // We only want advertisements that are likely to be a real nearby object
 // (phones, tags, earbuds). We ignore empty/unknown payloads with a weak RSSI.
@@ -104,6 +105,12 @@ int on_gap_events(struct ble_gap_event *event, void *arg) {
 
     g_devices[idx].rssi = rssi;
     g_devices[idx].lastSeenMs = 0;  // Not used; RSSI-only range.
+    // Direction finding: remember the board heading where this device was
+    // strongest, so the radar can point the blip toward it.
+    if (rssi > g_devices[idx].bestRssi) {
+      g_devices[idx].bestRssi = rssi;
+      g_devices[idx].bestYaw = g_current_yaw;
+    }
     if (!g_devices[idx].hasName) {
       parseLocalName(event->disc.data, event->disc.length_data, &g_devices[idx]);
     }
@@ -178,6 +185,8 @@ void BleScanner::init() {
 void BleScanner::poll() {
   // NimBLE runs on its own FreeRTOS task; nothing to do here per tick.
 }
+
+void BleScanner::set_current_yaw(float yaw_deg) { g_current_yaw = yaw_deg; }
 
 int BleScanner::snapshot(BleDevice *out, int capacity) {
   int n = g_deviceCount < capacity ? g_deviceCount : capacity;

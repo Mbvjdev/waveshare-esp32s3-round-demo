@@ -1,5 +1,7 @@
 #include "lcd/ST77916.h"
 #include "ble_scanner.h"
+#include "board.h"
+#include "gyro.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -22,25 +24,21 @@ constexpr int kWidth = 360;
 constexpr int kHeight = 360;
 
 // Dragon Ball radar palette (green sweep display).
-constexpr uint16_t kRadarBg = 0x0000;         // black background
-constexpr uint16_t kRadarGrid = 0x01E0;       // dim green ring/grid
-constexpr uint16_t kRadarSweep = 0x07FF;      // bright cyan-green sweep edge
-constexpr uint16_t kRadarSweepDim = 0x0280;   // sweep tail
-constexpr uint16_t kBlipStrong = 0x07E0;      // near + strong = bright green
-constexpr uint16_t kBlipMid = 0x4EC0;         // mid = yellow-green
-constexpr uint16_t kBlipWeak = 0x0400;        // far = dim green
-constexpr uint16_t kTextGreen = 0x07E0;
+constexpr uint16_t kRadarBg = 0x0000;
+constexpr uint16_t kRadarGrid = 0x01E0;
+constexpr uint16_t kRadarSweep = 0x07FF;
+constexpr uint16_t kRadarSweepDim = 0x0280;
+constexpr uint16_t kBlipStrong = 0x07E0;
+constexpr uint16_t kBlipMid = 0x4EC0;
+constexpr uint16_t kBlipWeak = 0x0400;
+constexpr uint16_t kHeadingArrow = 0xFEA0;  // gold heading marker
 
-i2c_master_bus_handle_t i2c_bus = nullptr;
-i2c_master_dev_handle_t tca_device = nullptr;
-uint8_t tca_output_state = 0;
-
-// Full-frame physics buffer in PSRAM; blitted to the panel in 16-line DMA chunks.
+i2c_master_dev_handle_t g_tca_device = nullptr;
+uint8_t g_tca_output_state = 0;
 uint16_t *g_frame = nullptr;
+float g_yaw = 0.0f;
 
 uint16_t swap16(uint16_t v) { return static_cast<uint16_t>((v << 8) | (v >> 8)); }
-
-struct Pt { int x; int y; };
 
 void put_pixel(int x, int y, uint16_t color) {
   if (x < 0 || x >= kWidth || y < 0 || y >= kHeight) return;
@@ -53,11 +51,8 @@ void fill_rect(int x0, int y0, int w, int h, uint16_t color) {
   if (y0 < 0) y0 = 0;
   if (x1 > kWidth) x1 = kWidth;
   if (y1 > kHeight) y1 = kHeight;
-  for (int y = y0; y < y1; ++y) {
-    for (int x = x0; x < x1; ++x) {
-      g_frame[y * kWidth + x] = color;
-    }
-  }
+  for (int y = y0; y < y1; ++y)
+    for (int x = x0; x < x1; ++x) g_frame[y * kWidth + x] = color;
 }
 
 void draw_hline(int x0, int x1, int y, uint16_t color) {
@@ -68,7 +63,6 @@ void draw_hline(int x0, int x1, int y, uint16_t color) {
   for (int x = x0; x <= x1; ++x) g_frame[y * kWidth + x] = color;
 }
 
-// Midpoint circle outline.
 void draw_circle(int cx, int cy, int r, uint16_t color) {
   int x = r, y = 0, err = 1 - r;
   while (x >= y) {
@@ -93,19 +87,7 @@ void fill_circle(int cx, int cy, int r, uint16_t color) {
   }
 }
 
-// Distance from RSSI: classic free-space log model calibrated ~-45 dBm @ 1m, n=2.
-float rssi_to_distance(int8_t rssi) {
-  const float n = 2.2f;
-  const float a = -40.0f;  // path loss at 1 m
-  return powf(10.0f, (a - rssi) / (10.0f * n));
-}
-
-// Stable pseudo-angle (0..360) from a device MAC so a given object keeps its bearing.
-uint32_t mac_hash_angle(uint64_t addr) {
-  uint64_t v = addr * 0x9E3779B97F4A7C15ULL;
-  return static_cast<uint32_t>((v ^ (v >> 33)) % 360u);
-}
-
+// Map a relative bearing (deg, -180..180, 0 = ahead) to a pixel along a ray.
 void blit_frame() {
   uint16_t *chunk = static_cast<uint16_t *>(
       heap_caps_malloc(kWidth * kLinesPerTransfer * sizeof(uint16_t),
@@ -113,11 +95,9 @@ void blit_frame() {
   if (!chunk) return;
   for (int y = 0; y < kHeight; y += kLinesPerTransfer) {
     int lines = (y + kLinesPerTransfer < kHeight) ? kLinesPerTransfer : (kHeight - y);
-    for (int l = 0; l < lines; ++l) {
-      for (int x = 0; x < kWidth; ++x) {
+    for (int l = 0; l < lines; ++l)
+      for (int x = 0; x < kWidth; ++x)
         chunk[l * kWidth + x] = swap16(g_frame[(y + l) * kWidth + x]);
-      }
-    }
     esp_lcd_panel_draw_bitmap(panel_handle, 0, y, kWidth, y + lines, chunk);
   }
   free(chunk);
@@ -132,28 +112,25 @@ void init_board_i2c() {
       .glitch_ignore_cnt = 7,
       .flags = {.enable_internal_pullup = true},
   };
-  ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus));
-  const i2c_device_config_t device_config = {
-      .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-      .device_address = kTcaAddress,
-      .scl_speed_hz = 400000,
-  };
-  ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus, &device_config, &tca_device));
+  ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &g_i2c_bus));
+  board_i2c_add(kTcaAddress, &g_tca_device);
 }
 
 void write_tca_output() {
-  const uint8_t payload[] = {0x01, tca_output_state};
-  ESP_ERROR_CHECK(i2c_master_transmit(tca_device, payload, sizeof(payload), 1000));
+  const uint8_t payload[] = {0x01, g_tca_output_state};
+  ESP_ERROR_CHECK(i2c_master_transmit(g_tca_device, payload, sizeof(payload), 1000));
 }
 }  // namespace
 
 extern "C" void Set_EXIO(uint8_t pin, bool state) {
-  if (pin == 0 || pin > 8 || tca_device == nullptr) return;
+  if (pin == 0 || pin > 8 || g_tca_device == nullptr) return;
   const uint8_t mask = static_cast<uint8_t>(1u << (pin - 1));
-  if (state) tca_output_state |= mask;
-  else tca_output_state &= static_cast<uint8_t>(~mask);
+  if (state) g_tca_output_state |= mask;
+  else g_tca_output_state &= static_cast<uint8_t>(~mask);
   write_tca_output();
 }
+
+float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 void draw_radar_frame(float sweep_deg) {
   const int cx = kWidth / 2, cy = kHeight / 2;
@@ -162,49 +139,51 @@ void draw_radar_frame(float sweep_deg) {
   fill_rect(0, 0, kWidth, kHeight, kRadarBg);
 
   // Concentric range rings.
-  for (int r = max_r; r > 0; r -= 33) {
-    draw_circle(cx, cy, r, kRadarGrid);
-  }
-  // Crosshair ticks.
+  for (int r = max_r; r > 0; r -= 33) draw_circle(cx, cy, r, kRadarGrid);
   draw_hline(cx - max_r, cx + max_r, cy, kRadarGrid);
-  draw_hline(cx, cx, cy - max_r, kRadarGrid);
-  for (int y = 0; y < kHeight; ++y) put_pixel(cx, y, kRadarGrid);  // vertical
-  // Center origin dot.
+  for (int y = 0; y < kHeight; ++y) put_pixel(cx, y, kRadarGrid);
   fill_circle(cx, cy, 4, kRadarSweep);
 
-  // Sweep beam: draw a fading trail behind the leading edge.
+  // Sweep beam with fading trailing edge (always rotates).
   for (int i = 0; i < 46; ++i) {
-    const float a = (sweep_deg - i * 1.6f) * 0.01745329252f;  // radians
-    const float co = cosf(a), si = sinf(a);
+    float a = (sweep_deg - i * 1.6f) * 0.01745329252f;
+    float co = cosf(a), si = sinf(a);
     uint16_t c = (i < 8) ? kRadarSweep : kRadarSweepDim;
     for (int r = 4; r <= max_r - 2; r += 2) {
-      int x = cx + static_cast<int>(r * co);
-      int y = cy + static_cast<int>(r * si);
-      put_pixel(x, y, c);
+      put_pixel(cx + static_cast<int>(r * co), cy + static_cast<int>(r * si), c);
     }
   }
 
-  // Device blips: stable bearing from MAC, range from RSSI.
+  // Heading marker: gold triangle pinning "ahead" (board forward).
+  for (int i = 0; i < 12; ++i) {
+    float a = (90.0f - 6.0f + i) * 0.01745329252f;  // small arc at top
+    put_pixel(cx + static_cast<int>(8 * cosf(a)),
+              cy - static_cast<int>(8 * sinf(a)), kHeadingArrow);
+  }
+
+  // Device blips with true direction finding: the blip is placed at the
+  // bearing where this device was strongest, relative to the board's current
+  // heading. Point the board at a device and it rises straight up (ahead).
   BleDevice devices[16];
   int n = BleScanner::snapshot(devices, 16);
   int shown = 0;
   for (int i = 0; i < n && shown < 8; ++i) {
     BleDevice &d = devices[i];
-    if (d.rssi <= -90) continue;  // too far to matter
-    // Clamp display radius: strong near centre, weak near outer ring.
-    float strength = (static_cast<float>(d.rssi) + 90.0f) / 55.0f;  // -90..-35
-    if (strength < 0.02f) strength = 0.02f;
-    if (strength > 1.0f) strength = 1.0f;
-    int radius = static_cast<int>(max_r * (1.0f - strength));
-    uint32_t ang = mac_hash_angle(d.addr);
-    float rad = ang * 0.01745329252f;
-    int bx = cx + static_cast<int>(radius * cosf(rad));
-    int by = cy + static_cast<int>(radius * sinf(rad));
+    if (d.bestRssi <= -90) continue;
+    float strength = (static_cast<float>(d.bestRssi) + 90.0f) / 55.0f;
+    strength = clampf(strength, 0.02f, 1.0f);
+    int radius = static_cast<int>(max_r * (1.0f - strength));  // near = inner
+    // Relative bearing: device bearing minus current board heading.
+    float rel = d.bestYaw - g_yaw;
+    while (rel > 180.0f) rel -= 360.0f;
+    while (rel < -180.0f) rel += 360.0f;
+    float rad = rel * 0.01745329252f;
+    int bx = cx + static_cast<int>(radius * sinf(rad));
+    int by = cy - static_cast<int>(radius * cosf(rad));
     uint16_t color = (strength > 0.72f) ? kBlipStrong :
                      (strength > 0.45f) ? kBlipMid : kBlipWeak;
     int sz = (strength > 0.72f) ? 5 : 4;
-    fill_circle(bx, by, sz, color);
-    fill_circle(bx, by, sz + 2, 0x0180);  // halo
+    fill_circle(bx, by, sz + 2, 0x0180);
     fill_circle(bx, by, sz, color);
     shown++;
   }
@@ -212,16 +191,14 @@ void draw_radar_frame(float sweep_deg) {
 
 extern "C" void app_main(void) {
   printf("\n=== Waveshare Round Lab / Dragon Ball Radar ===\n");
-  printf("ST77916 | native esp_lcd QSPI | 80 MHz | BLE tracker\n");
+  printf("ST77916 | native esp_lcd QSPI | 80 MHz | BLE tracker + heading\n");
 
   g_frame = static_cast<uint16_t *>(
       heap_caps_malloc(kWidth * kHeight * sizeof(uint16_t), MALLOC_CAP_SPIRAM));
-  if (!g_frame) {
-    printf("[radar] frame buffer allocation failed\n");
-  }
+  if (!g_frame) printf("[radar] frame buffer allocation failed\n");
 
   init_board_i2c();
-  tca_output_state = 0;
+  g_tca_output_state = 0;
   write_tca_output();
   printf("[board] TCA9554 ready, LCD reset through EXIO2\n");
 
@@ -235,12 +212,26 @@ extern "C" void app_main(void) {
   BleScanner::init();
   printf("[radar] BLE scanner started\n");
 
+  Gyro::begin();
+  printf("[radar] gyro heading: %s\n", Gyro::is_present() ? "QMI8658 OK" : "not detected");
+
   float sweep = 0.0f;
+  uint32_t last = esp_log_timestamp();
   while (true) {
+    uint32_t now = esp_log_timestamp();
+    float dt = (now - last) / 1000.0f;
+    last = now;
+    if (dt < 0.001f) dt = 0.001f;
+    if (dt > 0.1f) dt = 0.1f;
+
+    Gyro::tick(dt);
+    g_yaw = Gyro::yaw_deg();
+    BleScanner::set_current_yaw(g_yaw);
+
     draw_radar_frame(sweep);
     if (g_frame) blit_frame();
     sweep += 10.0f;
     if (sweep >= 360.0f) sweep -= 360.0f;
-    vTaskDelay(pdMS_TO_TICKS(40));  // ~25 fps sweep
+    vTaskDelay(pdMS_TO_TICKS(40));
   }
 }
